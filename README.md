@@ -32,3 +32,8 @@ conda activate Lepzien2021
 ```
 sh run_workflow.sh
 ```
+
+
+
+***
+## Detailed analysis description
