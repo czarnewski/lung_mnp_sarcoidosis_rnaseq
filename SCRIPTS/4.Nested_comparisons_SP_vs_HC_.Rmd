@@ -1,0 +1,303 @@
+---
+title: "Comparing Everything together"
+subtitle: "LOW stringency comparisons (pValue<0.01 , FC>1.5)"
+author: "Paulo Czarnewski"
+date: "28 Jun 2017"
+output:
+  html_document: default
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+
+***
+###Loading Required packages:
+```{r, echo=TRUE, include=T, warning=F, error=FALSE, results='hold',tidy=T,fig.align='center',fig.show='hold'}
+package_list <- c("readxl","preprocessCore","statmod","sva","RColorBrewer","rafalib","edgeR","rtracklayer","EDASeq","RUVSeq","pheatmap","org.Mm.eg.db","Rgraphviz","vioplot","biomaRt","scales","beeswarm","ggplot2","ggrepel","enrichR","factoextra","fgsea")
+
+
+inst_packages <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) {
+    install.packages(new.pkg, dependencies = TRUE, quiet = T)
+  if (!new.pkg %in% installed.packages()[, "Package"]){
+    Bio.pkg <- new.pkg[!(new.pkg %in% installed.packages()[, "Package"])]
+    source("http://bioconductor.org/biocLite.R",prompt.echo = F,echo=F); biocLite(Bio.pkg,suppressUpdates = T,suppressAutoUpdate = T)}}
+    data.frame("Pkg_Status"=suppressMessages(sapply(pkg, require, character.only = TRUE)))}
+
+inst_packages(package_list)
+```
+
+
+
+***
+#Loading Pre-processed data
+```{r EdgeR,echo=TRUE,include=T, results='hold',fig.height = 4.5,tidy=T,fig.align='center',fig.show='hold'}
+out <- paste0("/Users/paulo.barenco/Desktop/NBIS/Projects/A_SMED_SORENSEN_1805/ANALYSIS_COMPLETE/" )
+if(!dir.exists(out)){dir.create(out)}
+
+annot <- read.csv2(paste0(out,"../SUPP_FILES/gene_annotation.csv"),row.names = 1)
+Data <- read.csv2(paste0(out,"/Counts_batch_removed.csv"),row.names = 1)
+phenoData <- read.csv2(paste0(out,"/phenoData.csv"),row.names = 1)
+phenoData$patient.cell <- paste0(phenoData$cell.type.ID,"_",phenoData$patient.type)
+```
+
+
+
+***
+#Calculating standard DE analysis (edgeR)
+```{r EdgeR,echo=TRUE,include=T, results='hold',fig.height = 4.5,tidy=T,fig.align='center',fig.show='hold'}
+meta <- "cell.type.ID"
+
+for(i in as.character(unique(phenoData[,meta])[-3]) ){
+  out <- paste0("/Users/paulo.barenco/Desktop/NBIS/Projects/A_SMED_SORENSEN_1805/ANALYSIS_COMPLETE/NESTED_comparisons_Blood_vs_BAL_SP_vs_HP/" )
+  if(!dir.exists(out)){dir.create(out)}
+  
+  RawData2 <- Data[,phenoData[,meta]==i]
+  phenoData2 <- phenoData[phenoData[,meta]==i,]
+
+  #Creating output directory
+  message("\nProcessing comparisson for # ",i," ...")
+  out <- paste0(out,"/DGE_",i,"/" )
+  if(!dir.exists(out)){dir.create(out)}
+  setwd(out)
+  #-----------------------
+  
+
+    
+  #Calculating standard DE analysis (edgeR)
+  #-----------------------
+  #Create our design matrix to acomodate for different metadata information
+  Group <- factor(phenoData2[,"patient.type"])
+  design <- model.matrix(~ tissue.source * patient.type, data = phenoData2)
+  colnames(design)
+  #  Blood markers in SP = [ SP(Blood) - SP(BAL) ]  -  [ HC(Blood) - HC(BAL) ]
+  contr <- c( 1,-1,-1,1)
+  
+  
+  #Compute a "Blocking" experimental design to find any differences between strains conserved among tissues
+  y <- DGEList(counts=RawData2, group=Group)
+  
+  keep <- rowSums(cpm(y)>1) >= 3        #Here, we need to filter out genes containing 0 reads again (since we filtered the samples)
+  y <- y[keep, , keep.lib.sizes=FALSE]
+  
+  y <- calcNormFactors(y, method = "TMM")
+  y <- estimateDisp(y, design, robust=TRUE)
+  
+  fit <- glmQLFit(y, design, robust = T) #Better for low number of samples or 1 sample
+  normcounts <- cpm(y, normalized.lib.sizes = T, log = T)
+  lrt <- glmQLFTest(fit,coef = 4)
+  #lrt <- glmQLFTest(fit,contrast = contr)
+  DEtable <- topTags(lrt,n = "all")$table
+
+  #png(filename = paste0(out,"/BCV_",i,".png"),width = 900,height = 900,res=200)
+  pdf(paste0(out,"/BCV_",i,".pdf"),width = 4,height = 4, useDingbats = F)
+  plotBCV(y)
+  dev.off()
+  
+  DEtable$Signif <- (DEtable$PValue < 0.01) & (abs(DEtable$logFC) > .6)
+  DEtable$Gene <- rownames(DEtable)
+  DEtable$Description <- annot$description[match(rownames(DEtable),annot$hgnc_symbol)]
+  
+  top_DE <- rownames(DEtable)[DEtable$Signif]
+  write.csv2(DEtable,paste0("DGE_list_",i,".csv") )
+  write.csv2(DEtable[top_DE,],paste0("Signif_DGE_list_",i,".csv") )
+  write.csv2(normcounts[top_DE,],paste0("NormCounts_",i,".csv") )
+  PValue <- DEtable$PValue
+  logFC <- DEtable$logFC
+    
+  #Ploting P-value distribution
+  #png(filename = paste0(out,"/P-value_histogram_",i,".png"),width = 2000,height = 900,res=200)
+  pdf(paste0(out,"/P-value_histogram_",i,".pdf"),width = 10,height = 4, useDingbats = F)
+  mypar(1,2)
+  hist(DEtable$PValue,breaks = seq(0,1,by = .05),col=c("orange3",rep("grey70",100) ),main="Pvalue distribution")
+  hist(DEtable$FDR,breaks = seq(0,1,by = .05),col=c("orange3",rep("grey70",100) ),main="FDR distribution")
+  dev.off()
+  #-----------------------
+  
+  
+  
+  
+  ###Define annotations in the heatmap
+  #-----------------------
+  annotation_col = data.frame(CellType = factor(phenoData2$cell.type.ID),
+                              Tissue = factor(phenoData2$tissue.source),
+                              PatientType = factor(phenoData2$patient.type),
+                              Gender = factor(phenoData2$gender),
+                              row.names = rownames(phenoData2))
+  
+  ann_colors = list(CellType = setNames(hue_pal()(5),levels(annotation_col$CellType)),
+                    Tissue = setNames(brewer.pal(8,"Set2")[c(1,2)],levels(annotation_col$Tissue)),
+                    PatientType = setNames(brewer.pal(8,"Set2")[c(3,4)],levels(annotation_col$PatientType)),
+                    Gender = setNames(c("pink","lightblue"),levels(annotation_col$Gender)),
+                    PValue = colorRampPalette(c("grey","orange3"))(2))
+  #-----------------------
+  
+  
+  
+  
+  if(sum(DEtable$Signif)>2){
+  
+  #Ploting heatmap
+  annotation_row = data.frame(PValue = -log10(DEtable[top_DE,"PValue"]),row.names = top_DE)
+  cl <- ifelse(DEtable[top_DE,"logFC"] > 0,"UP","DOWN")
+  
+  annotation_row$Module <- factor(cl)
+  ann_colors$Module <- setNames(brewer.pal(9,"Set1")[2:1],c("DOWN","UP")) 
+  
+  
+  pheatmap(normcounts[top_DE,order(phenoData2$tissue.source)],scale = "row",cluster_cols = F,color=colorRampPalette(c("navy","navy","white","firebrick3","firebrick3"))(30),
+           clustering_method = "ward.D2",border=NA,cluster_rows = T,annotation_col = annotation_col, annotation_row = annotation_row, 
+           annotation_colors = ann_colors,cutree_rows = 2,filename = paste0("Heatmap_DGE_",i,".pdf"))
+  
+  for(j in unique(cl)){  write.csv2(DEtable[top_DE[cl==j],],paste0("DGE_",i,"_gene_",j,".csv") ) }
+  
+  
+  #Ploting volcano plot
+  #png(filename = paste0("Volcano_plot_DGE_",i,".png"),width = 1000,height = 1000,res=200)
+  pdf(paste0("Volcano_plot_DGE_",i,".pdf"),width = 6,height = 6, useDingbats = F)
+  abc <- ggplot(DEtable, aes(x = logFC, y = -log10(PValue)))  +   geom_point(aes(color = Signif))  +   scale_color_manual(values = c("grey", "red"))  +   theme_bw(base_size = 12) + theme(legend.position = "bottom") + geom_hline(yintercept=-log10(0.01), linetype="dashed", color = "black")   +  geom_vline(xintercept=c(-.6,.6), linetype="dashed", color = "black")  +   scale_x_continuous(limits=c(-1.2*max(abs(DEtable$logFC)), 1.2*max(abs(DEtable$logFC)))) + scale_y_continuous(limits=c(0, max(-log10(PValue))*1.4)) #+ scale_y_continuous(trans = log2_trans() )
+  if(length(top_DE) > 0){print(abc + geom_text_repel(data = subset(DEtable, Gene %in% top_DE[1:min(70,length(top_DE))]),  aes(label = Gene),size = 2, box.padding = unit(0.35, "lines"), point.padding = unit(0.3, "lines")))} else (print(abc))
+  dev.off()
+  
+  
+  #Ploting Piechart on the 
+  #png(filename = paste0("PieChart_DGE_",i,"_Chromossome_Representation.png"),width = 1000,height = 1000,res=200)
+  pdf(paste0("PieChart_DGE_",i,"_Chromossome_Representation.pdf"), useDingbats = F)
+  pie(sort(table(as.character(annot[match(top_DE,annot$hgnc_symbol),6])),decreasing = T), clockwise = T, col=colorRampPalette(c("firebrick3","grey","grey","grey"))(30),border = "white")
+  title("% of genes per Chromossome")
+  dev.off()
+  }
+  #-----------------------
+  
+  
+  
+  #Creating output directory
+  out2 <- paste0(out,"/GO_enrichment" )
+  if(!dir.exists(out2)){dir.create(out2)}
+  
+  out3 <- paste0(out,"/KEGG_enrichment" )
+  if(!dir.exists(out3)){dir.create(out3)}
+  
+  
+  wc_go = list()
+  wc_kegg = list()
+  pvalue_cutoff <- 0.1
+  no_genes_cutoff <- 3
+  #enrichR::listEnrichrDbs()
+  for(k in unique(cl)){
+    message("\nRunning module # ",k," ...")
+    gene_list <- top_DE[cl == k]
+    if(length(gene_list) > 10){
+    
+    a <- enrichr(genes=gene_list, databases = "GO_Biological_Process_2018")[[1]]
+    a <- a[order(a$P.value,decreasing = F),]
+    a <- a[a$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(a[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+    a <- a[grep("regulation",a$Term,invert = T),]
+    wc_go[[paste0(k)]] <- data.frame(Term = sub("\ [(].*","",a$Term), GOID= sub(".*\ [(]","",sub("[)]","",a$Term)), P.value = a$P.value, Genes=a$Genes)
+    write.csv2(wc_go[[paste0(k)]],file=paste0(out2,"/GO ",k,".csv"))
+    saveRDS(wc_go,file = "wc_go.rds")
+    
+    b <- enrichr(genes=gene_list, databases = "KEGG_2016")[[1]]
+    b <- b[order(b$P.value,decreasing = F),]
+    b <- b[grep("_hsa05",b$Term,invert = T),]   #Remove disease-related KEGG pathways ("hsa05"")
+    b <- b[b$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(b[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+    b$KEGGID <- sub(".*[_]","",b$Term); b$Term <- sub("[_].*","",b$Term)
+    wc_kegg[[paste0(i)]] <- data.frame(b)
+    write.csv2(b,file=paste0(out3,"/KEGG ",k,".csv"))
+    saveRDS(wc_kegg,file = "wc_go.rds")
+    }
+  }
+  cl<-NULL
+
+}
+```
+
+
+
+
+# GSEA
+```{r}
+out <- paste0("/Users/paulo.barenco/Desktop/NBIS/Projects/A_SMED_SORENSEN_1805/ANALYSIS_COMPLETE/NESTED_comparisons_Blood_vs_BAL_SP_vs_HP/" )
+if(!dir.exists(out)){dir.create(out)}
+
+for(i in as.character(unique(phenoData[,meta])[-3])){
+  
+#Creating output directory
+message("\nProcessing comparisson for # ",i," ...")
+out <- paste0("/Users/paulo.barenco/Desktop/NBIS/Projects/A_SMED_SORENSEN_1805/ANALYSIS_COMPLETE/NESTED_comparisons_Blood_vs_BAL_SP_vs_HP/DGE_",i,"/" )
+if(!dir.exists(out)){dir.create(out)}
+setwd(out)
+#-----------------------
+
+DEtable <- read.csv2(paste0(out,"/DGE_list_",i,".csv"),row.names = 1)
+gene_rank <- setNames(DEtable$logFC, rownames(DEtable))
+gene_rank <- sort(gene_rank, decreasing = T)
+
+GSEA_pathway_list <- c("h.all.v6.2.symbols.gmt.txt","c5.bp.v6.2.symbols.gmt.txt","c2.cp.kegg.v6.2.symbols.gmt.txt")
+
+
+for(k in GSEA_pathway_list){
+  message("    Processing list for # ",k," ...")
+
+  out4 <- paste0(out,"GSEA_",k )
+  if(!dir.exists(out4)){dir.create(out4)}
+  setwd(out4)
+  #try(file.remove(paste0(out4,"/",list.files(out4))))
+  
+  pathway <- gmtPathways(paste0("/Users/paulo.barenco/Desktop/NBIS/Projects/A_Smed_Sorensen_1805/SUPP_FILES/",k) )
+  fgseaRes <- fgsea( stats=gene_rank, pathways=pathway, minSize=15, maxSize=500, nperm=10000)
+
+
+  #Filter the results table to show only the top 10 UP and DOWN regulated processes (optional)
+  topPathwaysUp <- fgseaRes[padj < 0.1][ES > 0][head(order(NES,decreasing = T), n=10), pathway]
+  topPathwaysDown <- fgseaRes[padj < 0.1][ES < 0][head(order(NES,decreasing = F), n=10), pathway]
+  topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+  
+  fgseaRes <- data.frame(fgseaRes,row.names= fgseaRes$pathway)
+  fgseaRes$leadingEdge <- sapply(fgseaRes$leadingEdge,function(x) paste0(x,collapse = ","))
+
+  #Save enrichment files
+  write.csv2(fgseaRes[topPathways,],file=paste0(out4,"/GSEA_TOP10_",i,".csv"))
+  write.csv2(as.data.frame(fgseaRes),file=paste0(out4,"/GSEA_ALL_",i,".csv"),row.names = T)
+  write.csv2(fgseaRes[topPathwaysUp,],file=paste0(out4,"/GSEA_UP_",i,".csv"))
+  write.csv2(fgseaRes[topPathwaysDown,],file=paste0(out4,"/GSEA_DOWN_",i,".csv"))
+  
+  #Nice summary table (shown as a plot)
+  png(filename = paste0(out4,"/GSEA_enrichment_TOP10_",i,".png"),width = 2000,height = length(topPathways)*35+100,res=200)
+  plotGseaTable(pathway[topPathways], gene_rank, fgseaRes, gseaParam = 0.5,colwidths = c(20, 4, 2, 2, 2))
+  dev.off()
+  
+  if(sum(grepl("TNF",names(pathway)))>0){  topPathways <- c(topPathways, names(pathway)[grepl("TNF",names(pathway))]) }
+  for(j in topPathways){ plotEnrichment(pathway[[j]],  gene_rank) + labs(title=j); ggsave(filename = paste0(out4,"/enrichment_",j,"_",i,".pdf"),width = 6,height = 4) }
+  
+}
+}
+
+```
+
+
+
+
+```{r}
+lapply(wc_go,nrow)
+names(wc_go)
+unlist(lapply(wc_kegg,nrow))
+
+
+pdf(paste0(out2,"GO_enrichment.pdf"),height = 6*3,width = 5)
+par(mar=c(2,30,1,1),mfrow=c(par_list$n_mod[i],1))
+for(k in names(wc_go)){
+  if(dim(wc_go[[k]])[k]<5){n <- dim(wc_go[[k]])[1]}else{n<-5}
+try(barplot(-log(wc_go[[k]][n:1,2],10),names.arg=wc_go[[k]][n:1,1],horiz=T,las=1,col=colorRampPalette(c("grey80", ifelse(k=="DOWN","navy","firebrick3")))(nrow(wc_go[[k]])),xlab=" ",xlim=c(0,max(-log(wc_go[[k]][n:1,2],10))*1.2),tck=-.05,border=NA,cex.axis=1.5,cex.names=1.5,main=paste0("GO  ",k)))
+}
+dev.off()
+
+length(wc_go)
+par(mar=c(2,20,1,1),mfrow=c(par_list$n_mod[i],1))
+for(k in names(wc_go)){
+  if(dim(wc_kegg[[k]])[1]<5){n <- dim(wc_kegg[[k]])[1]}else{n<-5}
+try(barplot(-log(wc_kegg[[k]][n:1,2],10),names.arg=wc_kegg[[k]][n:1,1],horiz=T,las=1,col=colorRampPalette(c("grey80", ifelse(k=="DOWN","navy","firebrick3") ))(nrow(wc_kegg[[k]])),xlab=" ",xlim=c(0,max(-log(wc_kegg[[i]][n:1,2],10))*1.2),tck=-.05,border=NA,cex.axis=1.5,cex.names=1.5,main=paste0("KEGG  ",i)))
+}
+```

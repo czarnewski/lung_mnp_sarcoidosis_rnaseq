@@ -1,0 +1,427 @@
+---
+title: "Comparing Everything together"
+subtitle: "stringency comparisons (pValue<0.01 , FC>1.5)"
+author: "Paulo Czarnewski"
+date: "09 Apr 2019"
+output:
+  html_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+***
+###Loading Required packages:
+```{r, echo=TRUE, include=T, warning=F, error=FALSE, results='hold',tidy=T,fig.align='center',fig.show='hold'}
+package_list <- c("readxl","preprocessCore","sva","RColorBrewer","rafalib","edgeR","rtracklayer","EDASeq","RUVSeq","pheatmap","vioplot","biomaRt","scales","beeswarm","ggplot2","ggrepel","enrichR","factoextra")
+
+#"statmod""org.Mm.eg.db","Rgraphviz"
+
+inst_packages <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) {
+    install.packages(new.pkg, dependencies = TRUE, quiet = T)
+  if (!new.pkg %in% installed.packages()[, "Package"]){
+    Bio.pkg <- new.pkg[!(new.pkg %in% installed.packages()[, "Package"])]
+    source("http://bioconductor.org/biocLite.R",prompt.echo = F,echo=F); biocLite(Bio.pkg,suppressUpdates = T,suppressAutoUpdate = T)}}
+    data.frame("Pkg_Status"=suppressMessages(sapply(pkg, require, character.only = TRUE)),
+             "Pkg_Version"=sapply(pkg,function(x) paste0(x,"_",sessionInfo()$otherPkgs[[x]]$Version)),
+             "New_installation_needed?"=ifelse((pkg %in% installed.packages()[, "Package"]),"No","Yes"),row.names = pkg)
+  }
+
+inst_packages(package_list)
+```
+
+
+***
+#Loading the Gene expression table and the phenotypic Data table and sequencing information
+```{r, echo=TRUE,include=T, results='hold',fig.height = 3,fig.width = 3,tidy=T,fig.align='center',fig.show='hold'}
+path <- "../ANALYSIS"
+if(!dir.exists(path)){dir.create(path,recursive = T)}
+setwd(path)
+
+#Load phenotypic data
+phenoData <- read.csv2("../DATA/GSE174659_phenoData.csv", row.names = 1)
+dim(phenoData)
+
+#Load RAW counts
+RawData <- read.csv2("../DATA/GSE174659_Raw_counts.csv", row.names = 1)
+RawData <- RawData[,!duplicated(colnames(RawData))]
+dim(RawData)
+
+#Check that samples are in the same order
+rownames(phenoData)[!(rownames(phenoData) %in% colnames(RawData))]
+colnames(RawData)[ !( colnames(RawData) %in% rownames(phenoData)) ]
+
+#Filter samples not present (0 in this case)
+sel <- rownames(phenoData)[(rownames(phenoData) %in% colnames(RawData))]
+RawData <- RawData[,sel]
+phenoData <- phenoData[sel,]
+```
+
+
+#Compute sample distributions across sorted cells
+```{r}
+temp <- as.data.frame(sapply(unique(phenoData$patient.type) , function(x){
+  sapply(levels(phenoData$cell.groups),function(y,x){ length( x [ (phenoData$cell.groups==y) & (phenoData$patient.type == x)])},x=x)}))
+temp$TOTAL <- rowSums(temp) ; temp <- as.data.frame(t(temp))
+temp$TOTAL <- rowSums(temp)
+write.csv2(temp,paste0(path,"/Group_sample_distribution.csv"),row.names = T)
+
+
+temp <- as.data.frame(sapply(unique(phenoData$library.prep.method) , function(x){
+  sapply(levels(phenoData$cell.groups),function(y,x){ length( x [ (phenoData$cell.groups==y) & (phenoData$library.prep.method == x)])},x=x)}))
+temp$TOTAL <- rowSums(temp) ; temp <- as.data.frame(t(temp))
+temp$TOTAL <- rowSums(temp)
+write.csv2(temp,paste0(path,"/Batch_sample_distribution.csv"),row.names = T)
+
+
+temp <- as.data.frame(sapply(unique(paste0(phenoData$patient.type,"_",phenoData$library.prep.method)) , function(x){
+  sapply(levels(phenoData$cell.groups),function(y,x){ length( x [ (phenoData$cell.groups==y) & (paste0(phenoData$patient.type,"_",phenoData$library.prep.method) == x)])},x=x)}))
+temp$TOTAL <- rowSums(temp) ; temp <- as.data.frame(t(temp))
+temp$TOTAL <- rowSums(temp)
+write.csv2(temp,paste0(path,"/Group_Batch_sample_distribution.csv"),row.names = T)
+
+
+write.csv2(RawData,paste0(path,"/Raw_counts.csv"),row.names = T)
+
+if(!dir.exists(paste0(path,"/individual_counts"))){dir.create(paste0(path,"/individual_counts"))}
+for(i in colnames(RawData)){
+  l<-list()
+  l[[i]] <-as.matrix(RawData)[,i]
+  write.csv2( as.data.frame(l) ,
+              paste0(path,"/individual_counts/",i,".csv"),row.names = T)
+}
+
+
+write.csv2(phenoData,paste0(path,"/phenoData.csv"),row.names = T)
+```
+
+
+***
+#Filtering genes and samples
+```{r QC, echo=TRUE,include=T, results='hold',fig.height = 5,fig.width = 10,tidy=T,fig.align='center',fig.show='hold'}
+qcpath <- paste0(path,"/QC")
+if(!dir.exists(qcpath)){dir.create(qcpath,recursive = T)}
+
+#Plot the number of counts per sample according to the metadata supplied
+meta_info <- c("patient.type","tissue.source","gender","cell.type.ID","RNAseq.group.name","processing_batch","library.prep.method","cell.pop")
+mypar(1,1,mar = c(3, 2.5, 1.6, 1.1))
+for(i in meta_info){
+  message(i)
+  pdf( paste0(qcpath,"/QC_plot_",i,".pdf"),width = .5*(length(levels(factor(phenoData[,i])))+3),height = 4, useDingbats = F)
+
+  boxplot(rowSums(t(RawData))/1e6 ~ phenoData[,i],las=2,ylab="counts (x10^6)",outline=F,
+          col=hue_pal()(length(unique(phenoData[,i]))) [factor(levels(factor(phenoData[,i])))],main=i,ylim=c(0,25))
+  beeswarm(rowSums(t(RawData))/1e6 ~ phenoData[,i],add=T,cex=.5,pch=16)
+  dev.off()
+}
+```
+
+
+***
+#Filter out mitocondrial genes or those that do NOT belong to "protein-coding" or "long non-coding RNA"
+```{r Annotation, echo=TRUE, include=T, results='hold', fig.height = 3, fig.width = 5,tidy=T,fig.align='center',fig.show='hold'}
+
+#Gather annotation from each gene/transcript from bioMart
+if(file.exists(paste0(path,"/../SUPP_FILES/gene_annotation.csv"))){ annot <- read.csv2(paste0(path,"/../SUPP_FILES/gene_annotation.csv"),row.names = 1)
+} else {
+ensembl <- useMart("ensembl", dataset="hsapiens_gene_ensembl",host="apr2019.archive.ensembl.org")
+#listAttributes(ensembl)$name[grep("chrom",listAttributes(ensembl)$name)]
+annot <- getBM(c("ensembl_gene_id","hgnc_trans_name","hgnc_symbol","gene_biotype","transcript_biotype","chromosome_name"), mart=ensembl)
+write.csv2(annot,paste0(path,"/../SUPP_FILES/gene_annotation.csv")) }
+
+#Match gene/transcript annotation to our data
+transc_names <- annot[match(rownames(RawData),annot[,"ensembl_gene_id"]),"hgnc_trans_name"]
+gene_names <- annot[match(rownames(RawData),annot[,"ensembl_gene_id"]),"hgnc_symbol"]
+gene_biotype <- annot[match(rownames(RawData),annot[,"ensembl_gene_id"]),"gene_biotype"]
+transcript_biotype <- annot[match(rownames(RawData),annot[,"ensembl_gene_id"]),"transcript_biotype"]
+
+#Plot percentage of gene/transcript belonging to each category
+png(filename = paste0(getwd(),"/Gene_biotype_plot.png"),width = 2000,height = 900,res=200)
+mypar(1,1,mar = c(1, 9, 1.6, 9))
+pie(sort(table(gene_biotype),decreasing = T), clockwise = T)
+title("before filtering")
+dev.off()
+
+#Filter data for looking at known protein-coding genes
+select <- (gene_biotype == "protein_coding") & !is.na(gene_names) & (gene_names!="")
+RawData <- rowsum(RawData[select,], group = gene_names[select])
+dim(RawData)
+
+#Filter out genes expressed in two samples or less (with the number of reads above the threshold of 5 per million reads).
+Readfilter <- apply(RawData, 1, function(x) length( x[ x > 5 ]) >= 3 )
+RawData <- RawData[Readfilter,]
+dim(RawData)
+```
+
+
+
+***
+#Performing batch correction for the difference in library preparation
+```{r ,echo=TRUE,include=T, results='hold',fig.height = 4.5,tidy=T,fig.align='center',fig.show='hold'}
+batch <- factor(phenoData$library.prep.method)
+mod0 <- model.matrix(~phenoData$cell.groups, data=phenoData)
+
+#Transforming counts to log
+logdata <- log2(RawData+1)
+sum(rowSums(logdata) == 0)
+logdata <- as.matrix(logdata[rowSums(logdata) != 0,])
+
+#Applying Combat
+combat_data <- ComBat(dat=logdata, batch=batch, mod=mod0)
+
+#Transforming counts back to original scale (and removing negative values to 0)
+combat_data <- round(2^(combat_data)-1,0)
+sum(combat_data < 0)
+combat_data[combat_data < 0] <- 0
+Data <- combat_data
+# Data <- RawData
+```
+
+
+
+
+***
+#Calculating standard DE analysis (edgeR)
+```{r EdgeR,echo=TRUE,include=T, results='hold',fig.height = 4.5,tidy=T,fig.align='center',fig.show='hold'}
+#Create our design matrix to acomodate for different metadata information
+Group <- factor(phenoData$RNAseq.group.name)
+design <- model.matrix(~ library.prep.method + gender + patient.type + tissue.source + cell.type.ID, data = phenoData)
+colnames(design)
+
+#Compute a "Blocking" experimental design to find any differences between strains conserved among tissues
+y <- DGEList(counts=Data, group=Group)
+keep <- rowSums(cpm(y)>1) >= 2
+y <- y[keep, , keep.lib.sizes=FALSE]
+y <- calcNormFactors(y, method = "TMM")
+y <- estimateDisp(y, design, robust=TRUE)
+fit <- glmQLFit(y, design, robust=TRUE) #Better for low number of samples or 1 sample
+
+DEGenes_patient_control <- edgeR::glmQLFTest(fit, coef=4)$table
+
+
+pdf(paste0(path,"/BCV_plot.pdf"))
+#plotBCV(y,las=1)
+plotQLDisp(fit)#Better for low number of samples or 1 sample
+dev.off()
+normcounts <- cpm(y, normalized.lib.sizes = T, log = T)
+
+
+write.csv2(Data,paste0(path,"/Counts_batch_removed.csv"),row.names = T)
+write.csv2(normcounts,paste0(path,"/Normcounts_batch_removed.csv"),row.names = T)
+write.csv2(DEGenes_patient_control,paste0(path,"/DEGenes_patient_control.csv"),row.names = T)
+```
+
+
+
+***
+#Computing RLE
+```{r , echo=TRUE,include=T, results='hold',fig.height = 5,fig.width = 10,tidy=T,fig.align='center',fig.show='hold'}
+rlepath <- paste0(path,"/RLE")
+if(!dir.exists(rlepath)){dir.create(rlepath,recursive = T)}
+
+for(i in meta_info){
+  #png(filename = paste0(rlepath,"/RLE_plot_TMM_normalized_",i,".png"),width = 30*(ncol(RawData)+3),height = 900,res=200)
+  pdf(paste0(rlepath,"/RLE_plot_TMM_normalized_",i,".pdf"),width = .1*(ncol(RawData)+3),height = 4, useDingbats = F)
+
+  mypar(1,1,mar = c(6, 2.5, 1.6, 5))
+  plotRLE(as.matrix(normcounts)[,order(factor(phenoData[,i]))],las=2,outline=F,
+          col=hue_pal()(length(unique(phenoData[,i])))
+           [factor(phenoData[,i])[order(factor(phenoData[,i]))]],main=i,ylim=c(-2,2))
+  par(xpd=T)
+  legend(x = (ncol(RawData)+2.5),y = 3, paste0(levels(factor(phenoData[,i]))), bty = "n",cex=1, pt.cex=2, pt.bg = hue_pal()(length(levels(factor(phenoData[,i]))))[factor(levels( factor(phenoData[,i]) ))],pch=21)
+  par(xpd=F)
+  dev.off()
+}
+```
+
+
+
+
+
+***
+#Perform scaled PCA
+```{r ,echo=TRUE,include=T, results='hold', fig.height = 4.5, fig.width = 10,tidy=T,fig.align='center',fig.show='hold'}
+out <- paste0(path,"/PCA_plots" )
+if(!dir.exists(out)){dir.create(out,recursive = T)}
+
+
+#PERFORM NICE PCA AND CACLULATE %VARIANCE EXPLAINED
+#-----------------------------------------------------------------------
+cv = rowVars(normcounts)
+select = order(cv, decreasing=TRUE)[seq_len(min(3000, length(cv)))]
+
+pca = prcomp(t(normcounts[select,]))
+percent <- pca$sdev^2/sum(pca$sdev^2)*100
+labs <- sapply(seq_along(percent), function(i) {paste("PC ", i, " (", round(percent[i], 1), "%)", sep="")})
+pca$x <- scale(pca$x, center=T,scale = T)
+
+mypar(1,2,mar = c(3, 2.5, 1.6, 6))
+plot(pca$x[,1], pca$x[,2],col=c(1,2)[as.numeric(factor(phenoData$library.prep.method))])
+
+
+for(j in meta_info){
+  #png(filename = paste0(out,"/PCA_plot_",j,".png"),width = 1000,height = 900,res=200)
+  pdf(paste0(out,"/PCA_plot_",j,".pdf"),width = 5.5,height = 4.9,useDingbats = F)
+  mypar(1,1,mar = c(3, 2.5, 1.6, 6))
+myfactor <- factor(phenoData[,j])
+plot(pca$x[,1], pca$x[,2], xlab=labs[1], ylab=labs[2], las=1, xlim=c(-2,2), ylim=c(-2,2), cex.main=0.8,main="",type="n")
+x_means <- c(rowsum(pca$x[,1],myfactor)) / c(unlist(table(myfactor)))
+y_means <- c(rowsum(pca$x[,2],myfactor)) / c(unlist(table(myfactor)))
+for (i in 1:nrow(pca$x)){
+  lines(x = c(pca$x[i,1],x_means[myfactor[i]]),y=c(pca$x[i,2],y_means[myfactor[i]]),col=hue_pal()(length(levels(myfactor)))[myfactor[i]],lwd=2)
+}
+points(pca$x[,1], pca$x[,2], cex=1.5,
+       pch=20 + as.numeric(factor(phenoData$patient.type)),
+       bg = hue_pal()(length(levels(myfactor)))[myfactor],
+       lwd=1)
+points(x_means, y_means, cex=1, pch=21 ,  col = hue_pal()(length(levels(myfactor)))[factor(levels(myfactor))], bg="black",lwd=2)
+
+par(xpd=T)
+legend(x = 2.2,y = 2.3, paste0(levels(myfactor)), bty = "n",cex=.8, pt.cex=1.5, pt.bg = hue_pal()(length(levels(myfactor)))[factor(levels( myfactor ))],pch=21)
+legend(x = 2.2,y = -2, levels(factor(phenoData$patient.type)), bty = "n",cex=.8, pt.cex=1.5, pt.bg = "white",pch=c(21,22),col = "black")
+par(xpd=F)
+  dev.off()
+}
+#-----------------------------------------------------------------------
+```
+
+
+
+#Define annotations in the heatmap
+```{r,echo=TRUE,include=T, results='hold', fig.height = 6.6, fig.width = 10,tidy=T,fig.align='center',fig.show='hold'}
+#Ploting heatmap
+annotation_col = data.frame(CellType = factor(phenoData$cell.type.ID),
+                            Tissue = factor(phenoData$tissue.source),
+                            PatientType = factor(phenoData$patient.type),
+                            Gender = factor(phenoData$gender),
+                            LibraryPrep = factor(phenoData$library.prep.method),
+                            row.names = rownames(phenoData))
+
+ann_colors = list(CellType = setNames(hue_pal()(5),levels(annotation_col$CellType)),
+                  Tissue = setNames(brewer.pal(8,"Set2")[c(1,2)],levels(annotation_col$Tissue)),
+                  PatientType = setNames(brewer.pal(8,"Set2")[c(3,4)],levels(annotation_col$PatientType)),
+                  Gender = setNames(c("pink","lightblue"),levels(annotation_col$Gender)),
+                  LibraryPrep = setNames(c("grey40","grey90"),levels(annotation_col$LibraryPrep)),
+                  FDR = colorRampPalette(c("grey","orange3"))(2))
+```
+
+
+
+#Computing DGE
+```{r,echo=TRUE,include=T, results='hold', fig.height = 8, fig.width = 8,tidy=T,fig.align='center',fig.show='hold'}
+#Creating parameter list of comparissons to be made
+par_list <- list(name = c("library.prep.method","gender","patient.type","tissue.source","cell.type.ID"))
+par_list[["factors"]] <- lapply(as.list(phenoData[,par_list$name]),function(x)levels(factor(x)))[par_list$name]
+par_list[["FITcoef"]] <- sapply(par_list$name,function(x)grep(x,colnames(fit$coefficients)))
+par_list[["n_mod"]] <- sapply( par_list$name, function(x) min(2^(length(grep(x,colnames(fit$coefficients)))+1)-2,15) )
+par_list[["n_top"]] <- setNames(rep(100,length(par_list$name)), par_list$name)
+
+
+
+for(i in par_list$name){
+
+message("\nProcessing comparisson # ",i," ...")
+
+#Creating output directory
+out <- paste0(path,"/GERAL_comparisons/DGE_",i,"/" )
+if(!dir.exists(out)){dir.create(out,recursive = T)}
+
+#Calculating Pvalues and logFC
+#lrt <- glmLRT(fit, coef = par_list$FITcoef[[i]])
+lrt <- glmQLFTest(fit, coef = par_list$FITcoef[[i]])
+
+DEtable <- topTags(lrt,n = "all")$table
+if(length(grep("logFC",colnames(DEtable))) == 1){ DEtable$Signif <- (DEtable$FDR < 1e-4) & (abs(DEtable$logFC) > 1)
+} else {  DEtable$Signif <- (DEtable$FDR < 1e-4) & (rowSums(abs(DEtable[,grep("logFC",colnames(DEtable))]) > 1) > 1) }
+DEtable$Gene <- rownames(DEtable)
+
+top_DE <- rownames(DEtable)[DEtable$Signif]
+write.csv2(DEtable[top_DE,],paste0(out,"DGE_list_",i,".csv") )
+write.csv2(normcounts[top_DE,],paste0(out,"NormCounts_",i,".csv") )
+
+
+#Ploting P-value distribution
+png(filename = paste0(out,"/Histogram_pvalue_",i,".png"),width = 2000,height = 900,res=200)
+#pdf(paste0("Histogram_pvalue_",i,".pdf"),width = 10,height = 4)
+mypar(1,2)
+hist(DEtable$PValue,breaks = seq(0,1,by = .05),col=c("orange3",rep("grey70",100) ),main="Pvalue distribution")
+hist(DEtable$FDR,breaks = seq(0,1,by = .05),col=c("orange3",rep("grey70",100) ),main="FDR distribution")
+dev.off()
+
+
+#Ploting heatmap
+annotation_row = data.frame(FDR = -log10(DEtable[top_DE,"FDR"]),row.names = top_DE)
+cl <- pheatmap(normcounts[top_DE,],scale = "row",color=colorRampPalette(c("navy","navy","white","firebrick3","firebrick3"))(30),
+         clustering_method = "ward.D2",border=NA,cluster_rows = T, clustering_distance_cols = "correlation",cutree_rows = par_list$n_mod[i])
+annotation_row$Module <- factor(cutree(cl$tree_row,par_list$n_mod[i]))
+ann_colors$Module <- setNames(c(brewer.pal(9,"Set1"),brewer.pal(8,"Set2") )[1:par_list$n_mod[i]],levels(annotation_row$Module))
+
+o <- order(phenoData[,i])
+
+pheatmap(normcounts[top_DE,o],scale = "row",
+         color=colorRampPalette(c("navy","navy","white","firebrick3","firebrick3"))(30),
+         clustering_method = "ward.D2",border=NA,cluster_rows = T,
+         annotation_col = annotation_col, annotation_row = annotation_row,
+         annotation_colors = ann_colors,
+         clustering_distance_cols = "correlation",cutree_rows = par_list$n_mod[i],
+         filename = paste0(out,"Heatmap_DGE_",i,".pdf"))
+
+for(j in 1:par_list$n_mod[i]){  write.csv2(DEtable[names(cutree(cl$tree_row,par_list$n_mod[i])==i),],paste0(out,"DGE_",i,"_gene_module",j,".csv") ) }
+
+
+#Ploting volcano plot
+if(length(par_list$FITcoef[[i]]) == 1){
+  pdf(paste0(out,"Volcano_plot_DGE_",i,".pdf"),height = 10,width = 10,useDingbats = F)
+
+  if(length(top_DE) > par_list$n_top[i]){top_DE <- top_DE[1:par_list$n_top[i]]}
+  abc <- ggplot(DEtable, aes(x = logFC, y = -log10(FDR)))  +   geom_point(aes(color = Signif))  +   scale_color_manual(values = c("grey", "red"))  +   theme_bw(base_size = 12) + theme(legend.position = "bottom")  +   geom_text_repel(data = subset(DEtable, Gene %in% top_DE),  aes(label = Gene),size = 3, box.padding = unit(0.35, "lines"), point.padding = unit(0.3, "lines")) + geom_hline(yintercept=-log10(1e-4), linetype="dashed", color = "black")   +  geom_vline(xintercept=c(-1,1), linetype="dashed", color = "black")  +   scale_x_continuous(limits=c(-max(DEtable$logFC), max(DEtable$logFC))) #+ scale_y_continuous(trans = log2_trans() )
+  print(abc)
+  dev.off()
+}
+
+png(filename = paste0(out,"PieChart_DGE_",i,"_Chromossome_Representation.png"),width = 1000,height = 1000,res=200)
+#pdf(paste0("PieChart_DGE_",i,"_Chromossome_Representation.pdf"))
+pie(sort(table(as.character(annot[match(top_DE,annot$hgnc_symbol),6])),decreasing = T), clockwise = T, col=colorRampPalette(c("firebrick3","grey","grey","grey"))(30),border = "white")
+title("% of genes per Chromossome")
+dev.off()
+
+}
+
+
+
+#Creating output directory
+out2 <- paste0(out,"/GO_enrichment" )
+if(!dir.exists(out2)){dir.create(out2,recursive = T)}
+
+out3 <- paste0(out,"/KEGG_enrichment" )
+if(!dir.exists(out3)){dir.create(out3,recursive = T)}
+
+
+wc_go = list()
+wc_kegg = list()
+pvalue_cutoff <- 0.1
+no_genes_cutoff <- 3
+enrichR::listEnrichrDbs()
+for(k in 1:par_list$n_mod[i]){
+  message("\nRunning module # ",k," ...")
+  gene_list <- names(cutree(cl$tree_row,par_list$n_mod[i]))[cutree(cl$tree_row,par_list$n_mod[i])==k]
+
+  a <- enrichr(genes=gene_list, databases = "GO_Biological_Process_2018")[[1]]
+  a <- a[order(a$P.value,decreasing = F),]
+  a <- a[a$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(a[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+  a <- a[grep("regulation",a$Term,invert = T),]
+  wc_go[[paste0(k)]] <- data.frame(Term = sapply(strsplit(a[,"Term"]," [(]GO:"),"[[", 1), P.value = a$P.value, Genes=a$Genes)
+  write.csv2(a,file=paste0(out2,"/GO ",k,".csv"))
+
+  b <- enrichr(genes=gene_list, databases = "KEGG_2016")[[1]]
+  b <- b[order(b$P.value,decreasing = F),]
+  b <- b[grep("_hsa05",b$Term,invert = T),]   #Remove disease-related KEGG pathways ("hsa05"")
+  b <- b[b$P.value < pvalue_cutoff & as.numeric(sapply(strsplit(b[,"Overlap"],"/"),"[[", 1)) >= no_genes_cutoff,]
+  wc_kegg[[paste0(i)]] <- data.frame(Term = sapply(strsplit(b[,"Term"],"_"),"[[", 1), P.value = b$P.value, Genes=b$Genes)
+  write.csv2(b,file=paste0(out3,"/KEGG ",k,".csv"))
+}
+
+```
+
