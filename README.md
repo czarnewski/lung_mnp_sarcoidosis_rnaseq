@@ -2,7 +2,7 @@
 Paulo Czarnewski, 2012.07.31
 ***
 
-This is a public repository for the code associated to the paper: Lepzien et al 2021 Nat. Com. (doi:[10.1183/13993003.03468-2020](10.1183/13993003.03468-2020))
+This is a public repository for the code associated to the paper: Lepzien et al 2021 ERJ (doi:[10.1183/13993003.03468-2020](https://erj.ersjournals.com/content/early/2021/01/08/13993003.03468-2020))
 
 The folder structure used herein is divided into SCRIPTS, DATA, SUPP_FILES and ANALYSIS
 
